@@ -1,0 +1,145 @@
+openapi: 3.0.3
+info:
+  title: CB-CSCE Operations API
+  version: 0.1.0
+  description: >-
+    Contract for the cross-border commodity settlement and compliance control plane.
+    Synthetic demonstration responses are marked DEMO_SYNTHETIC and are not verified
+    bank, sanctions, regulatory, or payment outcomes.
+servers:
+  - url: /
+paths:
+  /api/health:
+    get:
+      summary: Readiness and persistence mode
+      responses:
+        '200':
+          description: Service is ready
+  /api/operations/summary:
+    get:
+      summary: Executive operational metrics and alerts
+      responses:
+        '200':
+          description: Multi-currency KPIs, chart series, alerts, and provenance
+  /api/trades:
+    get:
+      summary: List trade records
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+      responses:
+        '200': { description: Trade register }
+  /api/trades/{tradeId}:
+    get:
+      summary: Get one trade record
+      parameters:
+        - in: path
+          name: tradeId
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Trade detail }
+        '404': { description: Trade not found }
+  /api/trades/{tradeId}/hold:
+    post:
+      summary: Apply an auditable control hold
+      parameters:
+        - in: path
+          name: tradeId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 10, maxLength: 240 }
+      responses:
+        '200': { description: Hold applied and audit metadata returned }
+        '400': { description: Invalid reason }
+  /api/ledger/journals:
+    get:
+      summary: List posted journal records
+      responses:
+        '200': { description: Immutable journal register }
+    post:
+      summary: Post an idempotent balanced journal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PostJournalInput'
+      responses:
+        '201': { description: Journal posted }
+        '400': { description: Request validation failed }
+        '422': { description: Journal balance or accounting control failed }
+  /api/ledger/journals/validate:
+    post:
+      summary: Validate a journal without persisting a posting
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PostJournalInput'
+      responses:
+        '200': { description: Journal eligible for posting }
+        '422': { description: Journal is not balanced }
+  /api/compliance/cases:
+    get:
+      summary: List compliance cases and screening states
+      responses:
+        '200': { description: Compliance case queue }
+  /api/documents:
+    get:
+      summary: List document integrity records
+      responses:
+        '200': { description: Versioned document evidence }
+  /api/settlements:
+    get:
+      summary: List settlement controls
+      responses:
+        '200': { description: Escrow, T/T, and L/C settlement queue }
+  /api/shipments:
+    get:
+      summary: List shipment milestones
+      responses:
+        '200': { description: Shipment and demurrage records }
+  /api/treasury/fx-rates:
+    get:
+      summary: List rate snapshots
+      responses:
+        '200': { description: FX rate registry }
+  /api/audit:
+    get:
+      summary: List immutable audit events
+      responses:
+        '200': { description: Audit trail }
+components:
+  schemas:
+    PostJournalInput:
+      type: object
+      required: [organizationId, businessReference, transactionType, effectiveAt, idempotencyKey, lines]
+      properties:
+        organizationId: { type: string }
+        businessReference: { type: string }
+        transactionType: { type: string }
+        effectiveAt: { type: string, format: date-time }
+        idempotencyKey: { type: string }
+        lines:
+          type: array
+          minItems: 2
+          items:
+            type: object
+            required: [accountId, currencyCode, debitAmount, creditAmount]
+            properties:
+              accountId: { type: string }
+              currencyCode: { type: string, enum: [GHS, USD, AED, CNY, RUB] }
+              debitAmount: { type: string, pattern: '^\\d+(\\.\\d+)?$' }
+              creditAmount: { type: string, pattern: '^\\d+(\\.\\d+)?$' }
+              description: { type: string }

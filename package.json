@@ -1,0 +1,36 @@
+{
+  "name": "cbcsce",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.18.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server/index.ts",
+    "build": "tsc -p tsconfig.server.json && vite build",
+    "start": "node dist/server/index.js",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test tests/**/*.test.ts",
+    "db:migrate": "tsx server/migrate.ts"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "decimal.js": "latest",
+    "drizzle-orm": "latest",
+    "express": "latest",
+    "lucide-react": "latest",
+    "mysql2": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "recharts": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/express": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "tsx": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  }
+}
