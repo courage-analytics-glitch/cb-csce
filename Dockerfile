@@ -1,9 +1,8 @@
 FROM node:22-alpine AS build
 WORKDIR /app
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN corepack enable && corepack install --global pnpm@10.18.0 && pnpm --version && pnpm install --frozen-lockfile
+RUN npm install --global pnpm@10.18.0
 COPY . .
-RUN pnpm --version && pnpm build
+RUN test -f package.json && test -f pnpm-lock.yaml && test -f pnpm-workspace.yaml && pnpm --version && pnpm install --frozen-lockfile --prod=false && pnpm build
 
 FROM node:22-alpine AS runtime
 WORKDIR /app
