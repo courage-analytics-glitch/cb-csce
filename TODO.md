@@ -33,7 +33,7 @@ Status uses `[x]` for evidence-backed delivery, `[-]` for a partially delivered 
 
 ## 6. Security, audit, and integration boundaries
 
-- [-] Enforce organization scoping, role separation for maker/checker/treasury/compliance/operations/auditor/admin, validated external inputs, idempotency, safe error handling, no secrets in source, and complete actor/system audit events. Request validation, headers, CSP, explicit demo organization scoping, in-memory audit append, and no-secret configuration are delivered; authentication, tenant authorization, role enforcement, and durable audit persistence remain mandatory production gates.
+- [-] Enforce organization scoping, role separation for maker/checker/treasury/compliance/operations/auditor/admin, validated external inputs, idempotency, safe error handling, no secrets in source, and complete actor/system audit events. Request validation, bounded JSON bodies, request IDs, rate limits, security headers, API no-store responses, explicit server-side demo mutation-token gating, explicit demo organization scoping, in-memory audit append, and no-secret configuration are delivered; authentication, server-derived tenant authorization, role enforcement, maker-checker controls, distributed rate limiting, and durable audit persistence remain mandatory production gates.
 - [x] Keep external bank, sanctions, FX, port, and storage integrations behind adapters with explicit provenance, freshness, and failure states; do not claim live clearance, payment, or regulatory success without evidence. The current slice keeps these integrations synthetic/unavailable and visibly labeled.
 
 ## 7. Production-oriented documentation and validation

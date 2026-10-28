@@ -1,7 +1,14 @@
-import { Router, type Request } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
+import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { postJournalSchema, validateBalancedJournal } from "../packages/accounting/index.js";
 import { OperationsRepository, type DemoActor } from "./repository.js";
+
+const writeRoutes = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const requestWindows = new Map<string, { startedAt: number; count: number }>();
+const WINDOW_MS = 60_000;
+const READ_LIMIT = 120;
+const WRITE_LIMIT = 30;
 
 function demoActor(request: Request): DemoActor {
   return {
@@ -11,8 +18,34 @@ function demoActor(request: Request): DemoActor {
   };
 }
 
+export function mutationTokenIsValid(request: Request): boolean {
+  const expected = process.env.CSCE_DEMO_MUTATION_TOKEN;
+  const supplied = request.get("x-csce-demo-token");
+  if (!expected || !supplied) return false;
+  const expectedBytes = Buffer.from(expected, "utf8");
+  const suppliedBytes = Buffer.from(supplied, "utf8");
+  return expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
+}
+
+function securityGate(request: Request, response: Response, next: NextFunction) {
+  const key = `${request.ip}:${request.method === "GET" ? "read" : "write"}`;
+  const now = Date.now();
+  const limit = writeRoutes.has(request.method) ? WRITE_LIMIT : READ_LIMIT;
+  const current = requestWindows.get(key);
+  const window = !current || now - current.startedAt >= WINDOW_MS ? { startedAt: now, count: 1 } : { ...current, count: current.count + 1 };
+  requestWindows.set(key, window);
+  response.setHeader("RateLimit-Limit", limit);
+  response.setHeader("RateLimit-Remaining", Math.max(0, limit - window.count));
+  if (window.count > limit) return response.status(429).json({ error: "RATE_LIMITED", retryAfterSeconds: 60 });
+  if (writeRoutes.has(request.method) && !mutationTokenIsValid(request)) {
+    return response.status(503).json({ error: "DEMO_MUTATIONS_DISABLED", message: "State-changing demo operations require an explicit server-side demo mutation token." });
+  }
+  return next();
+}
+
 export function createApi(repository: OperationsRepository) {
   const router = Router();
+  router.use(securityGate);
 
   router.get("/health", (_req, res) => {
     res.json({ ok: true, service: "cb-csce-api", readiness: "ready", mode: repository.mode, persistence: "synthetic_repository", checkedAt: new Date().toISOString() });

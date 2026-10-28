@@ -7,3 +7,9 @@ The managed database is shared by development and published runtime. Treat migra
 # API Contract Notes
 
 `GET /api/health` returns readiness, persistence mode, and environment. `GET /api/operations/summary` returns multi-currency KPIs, charts, alerts, and provenance. `GET /api/trades`, `/api/ledger/journals`, `/api/compliance/cases`, `/api/documents`, `/api/settlements`, and `/api/shipments` return typed operational records. `POST /api/ledger/journals/validate` validates a journal without posting. `POST /api/ledger/journals` posts a validated journal through the idempotent ledger service. All external inputs are schema-validated and state-changing operations are auditable.
+
+## Security boundary
+
+The synthetic repository denies all state-changing demo API requests unless `CSCE_DEMO_MUTATION_TOKEN` is configured server-side and the caller supplies the matching `x-csce-demo-token` header. The token is a containment mechanism for demonstration mutations, not production authentication or authorization. Do not place it in browser code, source control, logs, or public documentation. Production must replace demo actor headers with an authenticated identity provider, server-derived tenant context, role/permission checks, maker-checker enforcement, durable audit events, and a database-backed transaction boundary.
+
+The runtime applies bounded JSON request bodies, API no-store responses, request IDs, rate limits, JSON parse/size error handling, CSP, `nosniff`, referrer and permissions policies, and disables Express fingerprinting. The in-memory rate limiter is suitable only for the synthetic single-process slice; production requires a distributed control or edge/API gateway policy.
