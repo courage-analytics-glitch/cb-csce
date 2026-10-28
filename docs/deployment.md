@@ -2,6 +2,8 @@
 
 The application builds with `pnpm build`, producing `dist/server` and `dist/public`. The container listens on `PORT` with a default of 3000 and exposes `/api/health` without authentication. The build does not require private credentials or a database connection; the database is opened at runtime.
 
+The Docker build explicitly bootstraps the repository-pinned `pnpm@10.18.0` before installing dependencies and running the build. This is required because relying on the base image's default Corepack selection can install with a different pnpm major version and leave the subsequent pinned build process without the expected tool binaries.
+
 The managed database is shared by development and published runtime. Treat migrations as additive and idempotent. For disaster recovery, export database records through an approved operational process, retain document objects in durable object storage, and preserve audit/event history. The platform project checkpoint is not a database backup.
 
 # API Contract Notes
