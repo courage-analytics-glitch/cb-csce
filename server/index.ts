@@ -1,4 +1,5 @@
 import express from "express";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -9,6 +10,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const repository = new OperationsRepository();
 const port = Number(process.env.PORT ?? 3000);
+
+await repository.initialize();
 
 app.disable("x-powered-by");
 app.set("trust proxy", false);
@@ -25,8 +28,11 @@ app.use((req, res, next) => {
   next();
 });
 app.use("/api", createApi(repository));
+app.use("/api", (_req, res) => res.status(404).json({ error: "API_ROUTE_NOT_FOUND" }));
 
-const publicDir = path.resolve(__dirname, "../public");
+const compiledPublicDir = path.resolve(__dirname, "../public");
+const sourceBuildPublicDir = path.resolve(process.cwd(), "dist/public");
+const publicDir = existsSync(path.join(compiledPublicDir, "index.html")) ? compiledPublicDir : sourceBuildPublicDir;
 app.use(express.static(publicDir, { index: "index.html", fallthrough: true }));
 app.use((_req, res) => res.sendFile(path.join(publicDir, "index.html")));
 app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {

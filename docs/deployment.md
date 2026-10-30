@@ -4,11 +4,11 @@ The application builds with `pnpm build`, producing `dist/server` and `dist/publ
 
 The Docker build explicitly bootstraps the repository-pinned `pnpm@10.18.0` before installing dependencies and running the build. This is required because relying on the base image's default Corepack selection can install with a different pnpm major version and leave the subsequent pinned build process without the expected tool binaries.
 
-The managed database is shared by development and published runtime. Treat migrations as additive and idempotent. For disaster recovery, export database records through an approved operational process, retain document objects in durable object storage, and preserve audit/event history. The platform project checkpoint is not a database backup.
+The managed database is shared by development and published runtime. On server startup, the repository runs the committed migration history, idempotently seeds the organization, chart of accounts, synthetic trades, journal fixtures, operational records and baseline audit events, then reports `MANAGED_DATABASE` only after those steps succeed. Treat migrations as additive and idempotent. For disaster recovery, export database records through an approved operational process, retain document objects in durable object storage, and preserve audit/event history. The platform project checkpoint is not a database backup.
 
 # API Contract Notes
 
-`GET /api/health` returns readiness, persistence mode, and environment. `GET /api/operations/summary` returns multi-currency KPIs, charts, alerts, and provenance. `GET /api/trades`, `/api/ledger/journals`, `/api/compliance/cases`, `/api/documents`, `/api/settlements`, and `/api/shipments` return typed operational records. `POST /api/ledger/journals/validate` validates a journal without posting. `POST /api/ledger/journals` posts a validated journal through the idempotent ledger service. All external inputs are schema-validated and state-changing operations are auditable.
+`GET /api/health` returns readiness, persistence mode, and environment. `GET /api/operations/summary` returns multi-currency KPIs, charts, alerts, and provenance. `GET /api/trades`, `/api/ledger/journals`, `/api/compliance/cases`, `/api/documents`, `/api/settlements`, and `/api/shipments` return typed operational records. `POST /api/ledger/journals/validate` validates a journal without posting. `POST /api/ledger/journals` posts a validated journal through a transaction-backed, idempotent ledger service; a retry returns the original durable journal. All external inputs are schema-validated and state-changing operations are auditable in MySQL.
 
 ## Security boundary
 
