@@ -70,6 +70,7 @@ export const trades = mysqlTable("trades", {
   status: varchar("status", { length: 40 }).notNull(),
   riskLevel: varchar("risk_level", { length: 20 }).notNull(),
   readiness: int("readiness").notNull().default(0),
+  blockers: json("blockers"),
   updatedAt: datetime("updated_at").notNull()
 }, (table) => ({ tradeReferenceUnique: uniqueIndex("trade_org_reference").on(table.organizationId, table.tradeReference) }));
 
@@ -84,3 +85,15 @@ export const auditEvents = mysqlTable("audit_events", {
   occurredAt: datetime("occurred_at").notNull(),
   metadata: json("metadata")
 });
+
+export const operationalRecords = mysqlTable("operational_records", {
+  organizationId: varchar("organization_id", { length: 40 }).notNull(),
+  recordType: varchar("record_type", { length: 40 }).notNull(),
+  recordId: varchar("record_id", { length: 80 }).notNull(),
+  payload: json("payload").notNull(),
+  createdAt: datetime("created_at").notNull(),
+  updatedAt: datetime("updated_at").notNull()
+}, (table) => ({
+  recordKey: uniqueIndex("operational_record_key").on(table.organizationId, table.recordType, table.recordId),
+  typeIndex: index("operational_record_type_idx").on(table.organizationId, table.recordType)
+}));

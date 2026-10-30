@@ -48,30 +48,33 @@ export function createApi(repository: OperationsRepository) {
   router.use(securityGate);
 
   router.get("/health", (_req, res) => {
-    res.json({ ok: true, service: "cb-csce-api", readiness: "ready", mode: repository.mode, persistence: "synthetic_repository", checkedAt: new Date().toISOString() });
+    res.json({ ok: true, service: "cb-csce-api", readiness: "ready", mode: repository.mode, persistence: repository.mode === "MANAGED_DATABASE" ? "managed_mysql" : "synthetic_repository", checkedAt: new Date().toISOString() });
   });
 
-  router.get("/operations/summary", (_req, res) => res.json(repository.summary()));
+  router.get("/operations/summary", async (_req, res) => res.json(await repository.summary()));
 
-  router.get("/trades", (req, res) => res.json({ items: repository.listTrades(typeof req.query.q === "string" ? req.query.q : undefined), provenance: repository.provenance() }));
+  router.get("/trades", async (req, res) => res.json({ items: await repository.listTrades(typeof req.query.q === "string" ? req.query.q : undefined), provenance: repository.provenance() }));
 
-  router.get("/trades/:tradeId", (req, res) => {
-    const trade = repository.getTrade(req.params.tradeId);
+  router.get("/trades/:tradeId", async (req, res) => {
+    const trade = await repository.getTrade(req.params.tradeId);
     if (!trade) return res.status(404).json({ error: "TRADE_NOT_FOUND" });
     return res.json({ item: trade, provenance: repository.provenance() });
   });
 
-  router.post("/trades/:tradeId/hold", (req, res) => {
+  router.get("/commodities", async (_req, res) => res.json({ items: await repository.commodityBatches(), provenance: repository.provenance() }));
+
+  router.post("/trades/:tradeId/hold", async (req, res) => {
     const body = z.object({ reason: z.string().min(10).max(240) }).safeParse(req.body);
     if (!body.success) return res.status(400).json({ error: "INVALID_REASON", details: body.error.flatten() });
     const actor = demoActor(req);
     if (actor.organizationId !== "org_demo") return res.status(403).json({ error: "DEMO_ORGANIZATION_SCOPE_REQUIRED" });
-    const trade = repository.placeTradeOnHold(req.params.tradeId, actor, body.data.reason);
+    const trade = await repository.placeTradeOnHold(req.params.tradeId, actor, body.data.reason);
     if (!trade) return res.status(404).json({ error: "TRADE_NOT_FOUND" });
     return res.json({ item: trade, audit: { action: "TRADE_HOLD_APPLIED", actor, reason: body.data.reason, provenance: repository.provenance() } });
   });
 
-  router.get("/ledger/journals", (_req, res) => res.json({ items: repository.journals(), provenance: repository.provenance() }));
+  router.get("/ledger/journals", async (_req, res) => res.json({ items: await repository.journals(), provenance: repository.provenance() }));
+  router.get("/ledger/accounts", async (_req, res) => res.json({ items: await repository.accounts(), provenance: repository.provenance() }));
 
   router.post("/ledger/journals/validate", (req, res) => {
     const parsed = postJournalSchema.safeParse(req.body);
@@ -84,38 +87,46 @@ export function createApi(repository: OperationsRepository) {
     }
   });
 
-  router.post("/ledger/journals", (req, res) => {
+  router.post("/ledger/journals", async (req, res) => {
     const parsed = postJournalSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid journal" });
     const actor = demoActor(req);
     if (actor.organizationId !== "org_demo" || parsed.data.organizationId !== "org_demo") return res.status(403).json({ error: "DEMO_ORGANIZATION_SCOPE_REQUIRED" });
     try {
-      const result = repository.postJournal(parsed.data, actor);
+      const result = await repository.postJournal(parsed.data, actor);
       return res.status(201).json({ item: result, provenance: repository.provenance() });
     } catch (error) {
       return res.status(422).json({ error: error instanceof Error ? error.message : "Journal failed validation" });
     }
   });
 
-  router.post("/ledger/journals/:journalId/reverse", (req, res) => {
+  router.post("/ledger/journals/:journalId/reverse", async (req, res) => {
     const body = z.object({ idempotencyKey: z.string().min(8).max(120) }).safeParse(req.body);
     if (!body.success) return res.status(400).json({ error: "INVALID_REVERSAL_REQUEST" });
     const actor = demoActor(req);
     if (actor.organizationId !== "org_demo") return res.status(403).json({ error: "DEMO_ORGANIZATION_SCOPE_REQUIRED" });
     try {
-      const result = repository.reverseJournal(req.params.journalId, body.data.idempotencyKey, actor);
+      const result = await repository.reverseJournal(req.params.journalId, body.data.idempotencyKey, actor);
       return res.status(201).json({ item: result, provenance: repository.provenance() });
     } catch (error) {
       return res.status(422).json({ error: error instanceof Error ? error.message : "Reversal failed" });
     }
   });
 
-  router.get("/compliance/cases", (_req, res) => res.json({ items: repository.datasets.complianceCases, provenance: repository.provenance() }));
-  router.get("/documents", (_req, res) => res.json({ items: repository.datasets.documents, provenance: repository.provenance() }));
-  router.get("/settlements", (_req, res) => res.json({ items: repository.datasets.settlements, provenance: repository.provenance() }));
-  router.get("/shipments", (_req, res) => res.json({ items: repository.datasets.shipments, provenance: repository.provenance() }));
-  router.get("/treasury/fx-rates", (_req, res) => res.json({ items: repository.datasets.fxRates, provenance: repository.provenance() }));
-  router.get("/audit", (_req, res) => res.json({ items: repository.datasets.auditEvents, provenance: repository.provenance() }));
+  router.get("/compliance/cases", async (_req, res) => res.json({ items: (await repository.datasets()).complianceCases, provenance: repository.provenance() }));
+  router.get("/documents", async (_req, res) => res.json({ items: (await repository.datasets()).documents, provenance: repository.provenance() }));
+  router.get("/settlements", async (_req, res) => res.json({ items: (await repository.datasets()).settlements, provenance: repository.provenance() }));
+  router.get("/shipments", async (_req, res) => res.json({ items: (await repository.datasets()).shipments, provenance: repository.provenance() }));
+  router.get("/treasury/fx-rates", async (_req, res) => res.json({ items: (await repository.datasets()).fxRates, provenance: repository.provenance() }));
+  router.get("/treasury/exposures", async (_req, res) => res.json({ items: await repository.fxExposures(), provenance: repository.provenance() }));
+  router.get("/compliance/counterparties", async (_req, res) => res.json({ items: await repository.counterparties(), provenance: repository.provenance() }));
+  router.get("/workflows", async (_req, res) => res.json({ items: await repository.workflows(), provenance: repository.provenance() }));
+  router.get("/analytics/liquidity-risk", async (_req, res) => res.json({ items: await repository.liquidityRisk(), provenance: repository.provenance() }));
+  router.get("/analytics/demurrage", async (_req, res) => res.json({ items: await repository.demurrage(), provenance: repository.provenance() }));
+  router.get("/reconciliation", async (_req, res) => res.json({ items: await repository.reconciliation(), provenance: repository.provenance() }));
+  router.get("/reports", async (_req, res) => res.json({ items: await repository.reports(), provenance: repository.provenance() }));
+  router.get("/ai/review", async (_req, res) => res.json({ items: await repository.agentFindings(), provenance: repository.provenance(), decisionPolicy: "ADVISORY_ONLY_HUMAN_APPROVAL_REQUIRED" }));
+  router.get("/audit", async (_req, res) => res.json({ items: (await repository.datasets()).auditEvents, provenance: repository.provenance() }));
 
   return router;
 }
