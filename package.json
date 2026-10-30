@@ -13,24 +13,24 @@
     "db:migrate": "tsx server/migrate.ts"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "decimal.js": "latest",
-    "drizzle-orm": "latest",
-    "express": "latest",
-    "lucide-react": "latest",
-    "mysql2": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "recharts": "latest",
-    "zod": "latest"
+    "@vitejs/plugin-react": "6.1.2",
+    "decimal.js": "10.6.0",
+    "drizzle-orm": "0.45.4",
+    "express": "5.3.0",
+    "lucide-react": "1.62.0",
+    "mysql2": "3.24.6",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "recharts": "3.10.1",
+    "zod": "4.6.7"
   },
   "devDependencies": {
-    "@types/express": "latest",
-    "@types/node": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
-    "tsx": "latest",
-    "typescript": "latest",
-    "vite": "latest"
+    "@types/express": "5.0.6",
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.5"
   }
 }
