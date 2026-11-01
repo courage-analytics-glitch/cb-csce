@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@clerk/express": "2.1.86",
+    "@clerk/react": "6.18.4",
     "@vitejs/plugin-react": "6.1.2",
     "decimal.js": "10.6.0",
     "drizzle-orm": "0.45.4",
