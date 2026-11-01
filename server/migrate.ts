@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { Pool, RowDataPacket } from "mysql2/promise";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const migrations = ["0000_initial.sql", "0001_operational_records.sql"];
+const migrations = ["0000_initial.sql", "0001_operational_records.sql", "0002_users_memberships.sql"];
 
 async function applySqlFile(pool: Pool, fileName: string): Promise<void> {
   const sql = await fs.readFile(path.join(projectRoot, "drizzle", fileName), "utf8");

@@ -10,9 +10,50 @@ type DatabaseRow = RowDataPacket & Record<string, any>;
 type OperationalRecordType = "compliance_case" | "document" | "settlement" | "shipment" | "fx_rate" | "counterparty" | "workflow" | "agent_finding" | "report";
 
 export type RuntimeMode = "MANAGED_DATABASE" | "DEMO_SYNTHETIC";
-export type DemoActor = { id: string; role: string; organizationId: string };
+export const roles = ["operations", "compliance", "treasury", "checker", "auditor", "admin"] as const;
+export type Role = (typeof roles)[number];
+export type Actor = { id: string; clerkUserId: string; role: Role; organizationId: string };
+export type MemberProfile = { clerkUserId: string; email: string; displayName?: string };
+export type PersistedJournal = PostedJournal & { createdBy: string };
+type HoldRecord = { placedBy: string | null; reason: string | null; previousStatus: string | null; previousReadiness: number | null };
 
-const ORGANIZATION_ID = "org_demo";
+export const ORGANIZATION_ID = "org_demo";
+const FIXTURE_MAKER = "system.synthetic-fixture";
+// Holds placed before migration 0002 have no recorded prior status to restore.
+const LEGACY_RELEASE_STATUS = "HOLD_RELEASED";
+
+export function isRole(value: string): value is Role {
+  return (roles as readonly string[]).includes(value);
+}
+
+export class MakerCheckerViolation extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MakerCheckerViolation";
+  }
+}
+
+export class TradeHoldConflict extends Error {
+  readonly code: "TRADE_ALREADY_ON_HOLD" | "TRADE_NOT_ON_HOLD";
+
+  constructor(code: TradeHoldConflict["code"], message: string) {
+    super(message);
+    this.name = "TradeHoldConflict";
+    this.code = code;
+  }
+}
+
+function newId(prefix: string): string {
+  return `${prefix}_${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+}
+
+function releasedTrade(trade: { status: string; readiness: number; blockers: string[] }, hold: HoldRecord | undefined) {
+  return {
+    status: hold?.previousStatus ?? LEGACY_RELEASE_STATUS,
+    readiness: hold?.previousReadiness ?? trade.readiness,
+    blockers: hold?.reason ? trade.blockers.filter((blocker) => blocker !== hold.reason) : trade.blockers
+  };
+}
 
 function iso(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
@@ -55,6 +96,10 @@ export class OperationsRepository {
   private readonly ledger = new InMemoryLedger();
   private readonly mutableTrades = structuredClone(trades);
   private readonly mutableAuditEvents = structuredClone(auditEvents);
+  private readonly holds = new Map<string, HoldRecord>();
+  private readonly journalMakers = new Map<string, string>();
+  private readonly memoryUsers = new Map<string, { id: string; email: string; displayName?: string }>();
+  private readonly memoryMemberships = new Map<string, Role>();
   private pool: Pool | undefined;
   private initialized = false;
   private runtimeMode: RuntimeMode = "DEMO_SYNTHETIC";
@@ -138,10 +183,49 @@ export class OperationsRepository {
     return rows[0];
   }
 
-  async placeTradeOnHold(id: string, actor: DemoActor, reason: string): Promise<Trade | undefined> {
+  async findMember(clerkUserId: string, organizationId: string): Promise<Actor | undefined> {
+    if (!this.isManaged()) {
+      const user = this.memoryUsers.get(clerkUserId);
+      const role = user && this.memoryMemberships.get(`${user.id}:${organizationId}`);
+      return user && role ? { id: user.id, clerkUserId, role, organizationId } : undefined;
+    }
+    const [rows] = await this.requirePool().query<DatabaseRow[]>("SELECT u.id, m.role FROM users u JOIN organization_memberships m ON m.user_id = u.id WHERE u.clerk_user_id = ? AND m.organization_id = ?", [clerkUserId, organizationId]);
+    const row = rows[0];
+    const role = row ? String(row.role) : "";
+    return row && isRole(role) ? { id: String(row.id), clerkUserId, role, organizationId } : undefined;
+  }
+
+  async upsertUserWithMembership(profile: MemberProfile, organizationId: string, role: Role): Promise<Actor> {
+    if (!this.isManaged()) {
+      const user = { id: this.memoryUsers.get(profile.clerkUserId)?.id ?? newId("usr"), email: profile.email, displayName: profile.displayName };
+      this.memoryUsers.set(profile.clerkUserId, user);
+      this.memoryMemberships.set(`${user.id}:${organizationId}`, role);
+      return { id: user.id, clerkUserId: profile.clerkUserId, role, organizationId };
+    }
+
+    const connection = await this.requirePool().getConnection();
+    try {
+      await connection.beginTransaction();
+      await connection.query("INSERT INTO users (id, clerk_user_id, email, display_name, created_at) VALUES (?, ?, ?, ?, UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE email = VALUES(email), display_name = VALUES(display_name)", [newId("usr"), profile.clerkUserId, profile.email, profile.displayName ?? null]);
+      const [rows] = await connection.query<DatabaseRow[]>("SELECT id FROM users WHERE clerk_user_id = ?", [profile.clerkUserId]);
+      const userId = String(rows[0]?.id);
+      await connection.query("INSERT INTO organization_memberships (user_id, organization_id, role, created_at) VALUES (?, ?, ?, UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE role = VALUES(role)", [userId, organizationId, role]);
+      await connection.commit();
+      return { id: userId, clerkUserId: profile.clerkUserId, role, organizationId };
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  async placeTradeOnHold(id: string, actor: Actor, reason: string): Promise<Trade | undefined> {
     if (!this.isManaged()) {
       const trade = this.mutableTrades.find((item) => item.id === id);
       if (!trade) return undefined;
+      if (trade.status === "ON_HOLD") throw new TradeHoldConflict("TRADE_ALREADY_ON_HOLD", "Trade is already on hold.");
+      this.holds.set(id, { placedBy: actor.id, reason, previousStatus: trade.status, previousReadiness: trade.readiness });
       trade.status = "ON_HOLD";
       trade.readiness = Math.min(trade.readiness, 49);
       trade.blockers = [...new Set([...trade.blockers, reason])];
@@ -160,8 +244,9 @@ export class OperationsRepository {
         await connection.rollback();
         return undefined;
       }
+      if (existing.status === "ON_HOLD") throw new TradeHoldConflict("TRADE_ALREADY_ON_HOLD", "Trade is already on hold.");
       const blockers = [...new Set([...jsonValue<string[]>(existing.blockers, []), reason])];
-      await connection.query("UPDATE trades SET status = 'ON_HOLD', readiness = LEAST(readiness, 49), blockers = ?, updated_at = UTC_TIMESTAMP() WHERE organization_id = ? AND id = ?", [JSON.stringify(blockers), actor.organizationId, id]);
+      await connection.query("UPDATE trades SET status = 'ON_HOLD', readiness = LEAST(readiness, 49), blockers = ?, hold_placed_by = ?, hold_placed_at = UTC_TIMESTAMP(), hold_reason = ?, hold_previous_status = ?, hold_previous_readiness = ?, updated_at = UTC_TIMESTAMP() WHERE organization_id = ? AND id = ?", [JSON.stringify(blockers), actor.id, reason, String(existing.status), Number(existing.readiness), actor.organizationId, id]);
       await this.insertAudit(connection, actor, "TRADE_HOLD_APPLIED", "TRADE", id, "ON_HOLD", { reason });
       await connection.commit();
       return this.getTrade(id);
@@ -173,8 +258,51 @@ export class OperationsRepository {
     }
   }
 
+  async releaseTradeHold(id: string, actor: Actor): Promise<Trade | undefined> {
+    if (!this.isManaged()) {
+      const trade = this.mutableTrades.find((item) => item.id === id);
+      if (!trade) return undefined;
+      if (trade.status !== "ON_HOLD") throw new TradeHoldConflict("TRADE_NOT_ON_HOLD", "Trade is not on hold.");
+      const hold = this.holds.get(id);
+      if (hold?.placedBy === actor.id) throw new MakerCheckerViolation("The user who placed this hold cannot release it.");
+      Object.assign(trade, releasedTrade(trade, hold), { updatedAt: new Date().toISOString() });
+      this.holds.delete(id);
+      this.recordAudit({ action: "TRADE_HOLD_RELEASED", actor, entity: id, result: trade.status, metadata: { holdPlacedBy: hold?.placedBy ?? null } });
+      return trade;
+    }
+
+    const connection = await this.requirePool().getConnection();
+    try {
+      await connection.beginTransaction();
+      const [existingRows] = await connection.query<DatabaseRow[]>("SELECT * FROM trades WHERE organization_id = ? AND id = ? FOR UPDATE", [actor.organizationId, id]);
+      const existing = existingRows[0];
+      if (!existing) {
+        await connection.rollback();
+        return undefined;
+      }
+      if (existing.status !== "ON_HOLD") throw new TradeHoldConflict("TRADE_NOT_ON_HOLD", "Trade is not on hold.");
+      const hold: HoldRecord = {
+        placedBy: existing.hold_placed_by === null ? null : String(existing.hold_placed_by),
+        reason: existing.hold_reason === null ? null : String(existing.hold_reason),
+        previousStatus: existing.hold_previous_status === null ? null : String(existing.hold_previous_status),
+        previousReadiness: existing.hold_previous_readiness === null ? null : Number(existing.hold_previous_readiness)
+      };
+      if (hold.placedBy === actor.id) throw new MakerCheckerViolation("The user who placed this hold cannot release it.");
+      const released = releasedTrade({ status: String(existing.status), readiness: Number(existing.readiness), blockers: jsonValue<string[]>(existing.blockers, []) }, hold);
+      await connection.query("UPDATE trades SET status = ?, readiness = ?, blockers = ?, hold_placed_by = NULL, hold_placed_at = NULL, hold_reason = NULL, hold_previous_status = NULL, hold_previous_readiness = NULL, updated_at = UTC_TIMESTAMP() WHERE organization_id = ? AND id = ?", [released.status, released.readiness, JSON.stringify(released.blockers), actor.organizationId, id]);
+      await this.insertAudit(connection, actor, "TRADE_HOLD_RELEASED", "TRADE", id, released.status, { holdPlacedBy: hold.placedBy });
+      await connection.commit();
+      return this.getTrade(id);
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
   async journals() {
-    if (!this.isManaged()) return this.ledger.list().map((journal) => this.journalView(journal));
+    if (!this.isManaged()) return this.ledger.list().map((journal) => this.journalView(this.withMaker(journal)));
     const rows = await this.databaseJournals();
     return rows.map((journal) => this.journalView(journal));
   }
@@ -255,11 +383,12 @@ export class OperationsRepository {
     return (await this.getOperational("agent_finding")).map((finding) => ({ ...finding, provenance: this.provenance(), model: "CB-CSCE advisory ruleset v0.1" }));
   }
 
-  async postJournal(input: PostJournalInput, actor: DemoActor): Promise<PostedJournal> {
+  async postJournal(input: PostJournalInput, actor: Actor, reversalOfJournalId?: string): Promise<PersistedJournal> {
     if (!this.isManaged()) {
       const journal = this.ledger.post(input);
+      if (!this.journalMakers.has(journal.journalId)) this.journalMakers.set(journal.journalId, actor.id);
       this.recordAudit({ action: "JOURNAL_POSTED", actor, entity: journal.journalId, result: journal.status, metadata: { journalNumber: journal.journalNumber, idempotencyKey: input.idempotencyKey } });
-      return journal;
+      return this.withMaker(journal);
     }
 
     const pool = this.requirePool();
@@ -285,7 +414,7 @@ export class OperationsRepository {
 
       const journalId = `jrnl_${randomUUID().replaceAll("-", "").slice(0, 24)}`;
       const journalNumber = `JRN-${Date.now()}-${randomUUID().replaceAll("-", "").slice(0, 6)}`;
-      await connection.query("INSERT INTO journal_entries (id, organization_id, journal_number, business_reference, transaction_type, description, effective_at, posted_at, status, created_by, idempotency_key, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), 'POSTED', ?, ?, ?)", [journalId, input.organizationId, journalNumber, input.businessReference, input.transactionType, null, new Date(input.effectiveAt), actor.id, input.idempotencyKey, JSON.stringify({ fingerprint: inputFingerprint })]);
+      await connection.query("INSERT INTO journal_entries (id, organization_id, journal_number, business_reference, transaction_type, description, effective_at, posted_at, status, created_by, idempotency_key, reversal_of_journal_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), 'POSTED', ?, ?, ?, ?)", [journalId, input.organizationId, journalNumber, input.businessReference, input.transactionType, null, new Date(input.effectiveAt), actor.id, input.idempotencyKey, reversalOfJournalId ?? null, JSON.stringify({ fingerprint: inputFingerprint })]);
       for (const [index, line] of input.lines.entries()) {
         await connection.query("INSERT INTO journal_lines (id, journal_entry_id, account_id, currency_code, debit_amount, credit_amount, description) VALUES (?, ?, ?, ?, ?, ?, ?)", [`${journalId}_line_${index + 1}`, journalId, line.accountId, line.currencyCode, line.debitAmount, line.creditAmount, line.description ?? null]);
       }
@@ -302,9 +431,12 @@ export class OperationsRepository {
     }
   }
 
-  async reverseJournal(journalId: string, idempotencyKey: string, actor: DemoActor): Promise<PostedJournal> {
-    const original = this.isManaged() ? await this.databaseJournalById(journalId) : this.ledger.list().find((journal) => journal.journalId === journalId);
+  async reverseJournal(journalId: string, idempotencyKey: string, actor: Actor): Promise<PersistedJournal> {
+    const memoryJournal = this.isManaged() ? undefined : this.ledger.list().find((journal) => journal.journalId === journalId);
+    const original = this.isManaged() ? await this.databaseJournalById(journalId) : memoryJournal && this.withMaker(memoryJournal);
     if (!original) throw new Error("Journal to reverse was not found.");
+    // created_by never changes after posting, so this read cannot race the reversal insert.
+    if (original.createdBy === actor.id) throw new MakerCheckerViolation("The user who posted this journal cannot reverse it.");
     return this.postJournal({
       organizationId: original.organizationId,
       businessReference: `${original.businessReference}-REVERSAL`,
@@ -312,7 +444,7 @@ export class OperationsRepository {
       effectiveAt: new Date().toISOString(),
       idempotencyKey,
       lines: original.lines.map((line) => ({ ...line, debitAmount: line.creditAmount, creditAmount: line.debitAmount, description: `Reversal of ${original.journalNumber}` }))
-    }, actor);
+    }, actor, original.journalId);
   }
 
   async datasets() {
@@ -375,7 +507,7 @@ export class OperationsRepository {
       await pool.query("INSERT IGNORE INTO trades (id, organization_id, trade_reference, contract_number, buyer, seller, commodity, quantity, unit, contract_value, contract_currency, origin_country, destination_country, loading_port, destination_port, status, risk_level, readiness, blockers, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())", [trade.id, ORGANIZATION_ID, trade.tradeReference, trade.contractNumber, trade.buyer, trade.seller, trade.commodity, trade.quantity.replaceAll(",", ""), trade.unit, trade.contractValue, trade.contractCurrency, trade.originCountry, trade.destinationCountry, trade.loadingPort, trade.destinationPort, trade.status, trade.riskLevel, trade.readiness, JSON.stringify(trade.blockers)]);
     }
     for (const fixture of journalFixtures) {
-      await pool.query("INSERT IGNORE INTO journal_entries (id, organization_id, journal_number, business_reference, transaction_type, description, effective_at, posted_at, status, created_by, idempotency_key, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [fixture.journalId, ORGANIZATION_ID, fixture.journalNumber, fixture.businessReference, fixture.transactionType, fixture.description, new Date(fixture.effectiveAt), new Date(fixture.postedAt), fixture.status, "system.synthetic-fixture", `fixture:${fixture.journalId}`, JSON.stringify({ provenance: "DEMO_SYNTHETIC", fingerprint: "fixture" })]);
+      await pool.query("INSERT IGNORE INTO journal_entries (id, organization_id, journal_number, business_reference, transaction_type, description, effective_at, posted_at, status, created_by, idempotency_key, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [fixture.journalId, ORGANIZATION_ID, fixture.journalNumber, fixture.businessReference, fixture.transactionType, fixture.description, new Date(fixture.effectiveAt), new Date(fixture.postedAt), fixture.status, FIXTURE_MAKER, `fixture:${fixture.journalId}`, JSON.stringify({ provenance: "DEMO_SYNTHETIC", fingerprint: "fixture" })]);
       const debitAccount = fixture.currency === "USD" ? "1200" : "1300";
       const creditAccount = fixture.currency === "USD" ? "2010" : "2030";
       await pool.query("INSERT IGNORE INTO journal_lines (id, journal_entry_id, account_id, currency_code, debit_amount, credit_amount, description) VALUES (?, ?, ?, ?, ?, '0', ?), (?, ?, ?, ?, '0', ?, ?)", [`${fixture.journalId}_debit`, fixture.journalId, debitAccount, fixture.currency, fixture.debit, fixture.description, `${fixture.journalId}_credit`, fixture.journalId, creditAccount, fixture.currency, fixture.credit, fixture.description]);
@@ -407,28 +539,32 @@ export class OperationsRepository {
     return rows.map((row) => ({ id: String(row.id), tradeReference: String(row.trade_reference), contractNumber: String(row.contract_number), buyer: String(row.buyer), seller: String(row.seller), commodity: String(row.commodity), quantity: String(row.quantity), unit: String(row.unit), contractValue: String(row.contract_value), contractCurrency: String(row.contract_currency) as Trade["contractCurrency"], originCountry: String(row.origin_country), destinationCountry: String(row.destination_country), loadingPort: String(row.loading_port), destinationPort: String(row.destination_port), status: String(row.status), riskLevel: String(row.risk_level) as Trade["riskLevel"], readiness: Number(row.readiness), blockers: jsonValue<string[]>(row.blockers, []), updatedAt: iso(row.updated_at) }));
   }
 
-  private async databaseJournals(): Promise<PostedJournal[]> {
-    const [rows] = await this.requirePool().query<DatabaseRow[]>("SELECT e.id, e.organization_id, e.journal_number, e.business_reference, e.transaction_type, e.effective_at, e.posted_at, e.status, l.account_id, l.currency_code, l.debit_amount, l.credit_amount, l.description FROM journal_entries e JOIN journal_lines l ON l.journal_entry_id = e.id WHERE e.organization_id = ? ORDER BY e.posted_at DESC, l.id", [ORGANIZATION_ID]);
+  private withMaker(journal: PostedJournal): PersistedJournal {
+    return { ...journal, createdBy: this.journalMakers.get(journal.journalId) ?? FIXTURE_MAKER };
+  }
+
+  private async databaseJournals(): Promise<PersistedJournal[]> {
+    const [rows] = await this.requirePool().query<DatabaseRow[]>("SELECT e.id, e.organization_id, e.journal_number, e.business_reference, e.transaction_type, e.effective_at, e.posted_at, e.status, e.created_by, l.account_id, l.currency_code, l.debit_amount, l.credit_amount, l.description FROM journal_entries e JOIN journal_lines l ON l.journal_entry_id = e.id WHERE e.organization_id = ? ORDER BY e.posted_at DESC, l.id", [ORGANIZATION_ID]);
     return this.groupJournalRows(rows);
   }
 
-  private async databaseJournalById(id: string): Promise<PostedJournal | undefined> {
-    const [rows] = await this.requirePool().query<DatabaseRow[]>("SELECT e.id, e.organization_id, e.journal_number, e.business_reference, e.transaction_type, e.effective_at, e.posted_at, e.status, l.account_id, l.currency_code, l.debit_amount, l.credit_amount, l.description FROM journal_entries e JOIN journal_lines l ON l.journal_entry_id = e.id WHERE e.organization_id = ? AND e.id = ? ORDER BY l.id", [ORGANIZATION_ID, id]);
+  private async databaseJournalById(id: string): Promise<PersistedJournal | undefined> {
+    const [rows] = await this.requirePool().query<DatabaseRow[]>("SELECT e.id, e.organization_id, e.journal_number, e.business_reference, e.transaction_type, e.effective_at, e.posted_at, e.status, e.created_by, l.account_id, l.currency_code, l.debit_amount, l.credit_amount, l.description FROM journal_entries e JOIN journal_lines l ON l.journal_entry_id = e.id WHERE e.organization_id = ? AND e.id = ? ORDER BY l.id", [ORGANIZATION_ID, id]);
     return this.groupJournalRows(rows)[0];
   }
 
-  private groupJournalRows(rows: DatabaseRow[]): PostedJournal[] {
-    const grouped = new Map<string, PostedJournal>();
+  private groupJournalRows(rows: DatabaseRow[]): PersistedJournal[] {
+    const grouped = new Map<string, PersistedJournal>();
     for (const row of rows) {
       const id = String(row.id);
-      const current = grouped.get(id) ?? { journalId: id, journalNumber: String(row.journal_number), organizationId: String(row.organization_id), businessReference: String(row.business_reference), transactionType: String(row.transaction_type), effectiveAt: iso(row.effective_at), idempotencyKey: `persisted:${id}`, lines: [], status: "POSTED", postedAt: iso(row.posted_at) };
+      const current = grouped.get(id) ?? { journalId: id, journalNumber: String(row.journal_number), organizationId: String(row.organization_id), businessReference: String(row.business_reference), transactionType: String(row.transaction_type), effectiveAt: iso(row.effective_at), idempotencyKey: `persisted:${id}`, lines: [], status: "POSTED", postedAt: iso(row.posted_at), createdBy: String(row.created_by) };
       current.lines.push({ accountId: String(row.account_id), currencyCode: String(row.currency_code) as any, debitAmount: String(row.debit_amount), creditAmount: String(row.credit_amount), description: row.description ? String(row.description) : undefined });
       grouped.set(id, current);
     }
     return [...grouped.values()];
   }
 
-  private journalView(journal: PostedJournal) {
+  private journalView(journal: PersistedJournal) {
     return { ...journal, currency: journal.lines[0]?.currencyCode, debit: journal.lines.reduce((total, line) => total + Number(line.debitAmount), 0).toFixed(2), credit: journal.lines.reduce((total, line) => total + Number(line.creditAmount), 0).toFixed(2), provenance: this.provenance() };
   }
 
@@ -437,7 +573,7 @@ export class OperationsRepository {
     return Object.fromEntries(rows.map((row) => [String(row.id), { id: String(row.id), accountCode: String(row.account_code), currencyCode: String(row.currency_code) as AccountDefinition["currencyCode"], status: String(row.status) as AccountDefinition["status"] }]));
   }
 
-  private async insertAudit(connection: PoolConnection, actor: DemoActor, action: string, entityType: string, entityId: string, result: string, metadata?: JsonObject): Promise<void> {
+  private async insertAudit(connection: PoolConnection, actor: Actor, action: string, entityType: string, entityId: string, result: string, metadata?: JsonObject): Promise<void> {
     await connection.query("INSERT INTO audit_events (id, organization_id, actor_id, actor_role, action, entity_type, entity_id, occurred_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?)", [`audit_${randomUUID().replaceAll("-", "").slice(0, 24)}`, actor.organizationId, actor.id, actor.role, action, entityType, entityId, JSON.stringify({ ...(metadata ?? {}), result })]);
   }
 
@@ -463,7 +599,7 @@ export class OperationsRepository {
     ];
   }
 
-  private recordAudit(event: { action: string; actor: DemoActor; entity: string; result: string; metadata?: JsonObject }) {
+  private recordAudit(event: { action: string; actor: Actor; entity: string; result: string; metadata?: JsonObject }) {
     this.mutableAuditEvents.unshift({ id: `audit_runtime_${this.mutableAuditEvents.length + 1}`, time: new Date().toISOString().slice(11, 19), action: event.action, actor: `${event.actor.id} · ${event.actor.role}`, entity: event.entity, result: event.result, metadata: event.metadata, provenance: this.provenance() });
   }
 }

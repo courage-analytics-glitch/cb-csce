@@ -1,55 +1,48 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
-import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { postJournalSchema, validateBalancedJournal } from "../packages/accounting/index.js";
-import { OperationsRepository, type DemoActor } from "./repository.js";
+import { MakerCheckerViolation, OperationsRepository, ORGANIZATION_ID, TradeHoldConflict, type Actor } from "./repository.js";
+import { actorOf, requireAuth, requireRole, resolveActor, type SessionResolver } from "./auth.js";
 
 const writeRoutes = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-const requestWindows = new Map<string, { startedAt: number; count: number }>();
 const WINDOW_MS = 60_000;
 const READ_LIMIT = 120;
 const WRITE_LIMIT = 30;
 
-function demoActor(request: Request): DemoActor {
-  return {
-    id: request.get("x-csce-actor") ?? "demo.operator",
-    role: request.get("x-csce-role") ?? "operations",
-    organizationId: request.get("x-csce-organization") ?? "org_demo"
+export type ApiOptions = { resolveSession: SessionResolver };
+
+function rateLimit() {
+  const requestWindows = new Map<string, { startedAt: number; count: number }>();
+  return (request: Request, response: Response, next: NextFunction) => {
+    const key = `${request.ip}:${request.method === "GET" ? "read" : "write"}`;
+    const now = Date.now();
+    const limit = writeRoutes.has(request.method) ? WRITE_LIMIT : READ_LIMIT;
+    const current = requestWindows.get(key);
+    const window = !current || now - current.startedAt >= WINDOW_MS ? { startedAt: now, count: 1 } : { ...current, count: current.count + 1 };
+    requestWindows.set(key, window);
+    response.setHeader("RateLimit-Limit", limit);
+    response.setHeader("RateLimit-Remaining", Math.max(0, limit - window.count));
+    if (window.count > limit) return response.status(429).json({ error: "RATE_LIMITED", retryAfterSeconds: 60 });
+    return next();
   };
 }
 
-export function mutationTokenIsValid(request: Request): boolean {
-  const expected = process.env.CSCE_DEMO_MUTATION_TOKEN;
-  const supplied = request.get("x-csce-demo-token");
-  if (!expected || !supplied) return false;
-  const expectedBytes = Buffer.from(expected, "utf8");
-  const suppliedBytes = Buffer.from(supplied, "utf8");
-  return expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
+function publicActor(actor: Actor) {
+  return { id: actor.id, role: actor.role, organizationId: actor.organizationId };
 }
 
-function securityGate(request: Request, response: Response, next: NextFunction) {
-  const key = `${request.ip}:${request.method === "GET" ? "read" : "write"}`;
-  const now = Date.now();
-  const limit = writeRoutes.has(request.method) ? WRITE_LIMIT : READ_LIMIT;
-  const current = requestWindows.get(key);
-  const window = !current || now - current.startedAt >= WINDOW_MS ? { startedAt: now, count: 1 } : { ...current, count: current.count + 1 };
-  requestWindows.set(key, window);
-  response.setHeader("RateLimit-Limit", limit);
-  response.setHeader("RateLimit-Remaining", Math.max(0, limit - window.count));
-  if (window.count > limit) return response.status(429).json({ error: "RATE_LIMITED", retryAfterSeconds: 60 });
-  if (writeRoutes.has(request.method) && !mutationTokenIsValid(request)) {
-    return response.status(503).json({ error: "DEMO_MUTATIONS_DISABLED", message: "State-changing demo operations require an explicit server-side demo mutation token." });
-  }
-  return next();
-}
-
-export function createApi(repository: OperationsRepository) {
+export function createApi(repository: OperationsRepository, options: ApiOptions) {
   const router = Router();
-  router.use(securityGate);
+  router.use(rateLimit());
 
   router.get("/health", (_req, res) => {
     res.json({ ok: true, service: "cb-csce-api", readiness: "ready", mode: repository.mode, persistence: repository.mode === "MANAGED_DATABASE" ? "managed_mysql" : "synthetic_repository", checkedAt: new Date().toISOString() });
   });
+
+  // Everything below /health requires a verified Clerk session and an org_demo membership.
+  router.use(requireAuth(options.resolveSession), resolveActor(repository));
+
+  router.get("/me", (req, res) => res.json({ item: publicActor(actorOf(req)) }));
 
   router.get("/operations/summary", async (_req, res) => res.json(await repository.summary()));
 
@@ -63,20 +56,37 @@ export function createApi(repository: OperationsRepository) {
 
   router.get("/commodities", async (_req, res) => res.json({ items: await repository.commodityBatches(), provenance: repository.provenance() }));
 
-  router.post("/trades/:tradeId/hold", async (req, res) => {
+  router.post("/trades/:tradeId/hold", requireRole("operations", "compliance"), async (req, res) => {
     const body = z.object({ reason: z.string().min(10).max(240) }).safeParse(req.body);
     if (!body.success) return res.status(400).json({ error: "INVALID_REASON", details: body.error.flatten() });
-    const actor = demoActor(req);
-    if (actor.organizationId !== "org_demo") return res.status(403).json({ error: "DEMO_ORGANIZATION_SCOPE_REQUIRED" });
-    const trade = await repository.placeTradeOnHold(req.params.tradeId, actor, body.data.reason);
-    if (!trade) return res.status(404).json({ error: "TRADE_NOT_FOUND" });
-    return res.json({ item: trade, audit: { action: "TRADE_HOLD_APPLIED", actor, reason: body.data.reason, provenance: repository.provenance() } });
+    const actor = actorOf(req);
+    try {
+      const trade = await repository.placeTradeOnHold(req.params.tradeId, actor, body.data.reason);
+      if (!trade) return res.status(404).json({ error: "TRADE_NOT_FOUND" });
+      return res.json({ item: trade, audit: { action: "TRADE_HOLD_APPLIED", actor: publicActor(actor), reason: body.data.reason, provenance: repository.provenance() } });
+    } catch (error) {
+      if (error instanceof TradeHoldConflict) return res.status(409).json({ error: error.code });
+      throw error;
+    }
+  });
+
+  router.post("/trades/:tradeId/release", requireRole("compliance", "checker"), async (req, res) => {
+    const actor = actorOf(req);
+    try {
+      const trade = await repository.releaseTradeHold(req.params.tradeId, actor);
+      if (!trade) return res.status(404).json({ error: "TRADE_NOT_FOUND" });
+      return res.json({ item: trade, audit: { action: "TRADE_HOLD_RELEASED", actor: publicActor(actor), provenance: repository.provenance() } });
+    } catch (error) {
+      if (error instanceof TradeHoldConflict) return res.status(409).json({ error: error.code });
+      if (error instanceof MakerCheckerViolation) return res.status(403).json({ error: "MAKER_CHECKER_VIOLATION", message: error.message });
+      throw error;
+    }
   });
 
   router.get("/ledger/journals", async (_req, res) => res.json({ items: await repository.journals(), provenance: repository.provenance() }));
   router.get("/ledger/accounts", async (_req, res) => res.json({ items: await repository.accounts(), provenance: repository.provenance() }));
 
-  router.post("/ledger/journals/validate", (req, res) => {
+  router.post("/ledger/journals/validate", requireRole("treasury", "checker"), (req, res) => {
     const parsed = postJournalSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ valid: false, error: parsed.error.issues[0]?.message ?? "Invalid journal" });
     try {
@@ -87,11 +97,11 @@ export function createApi(repository: OperationsRepository) {
     }
   });
 
-  router.post("/ledger/journals", async (req, res) => {
+  router.post("/ledger/journals", requireRole("treasury"), async (req, res) => {
     const parsed = postJournalSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid journal" });
-    const actor = demoActor(req);
-    if (actor.organizationId !== "org_demo" || parsed.data.organizationId !== "org_demo") return res.status(403).json({ error: "DEMO_ORGANIZATION_SCOPE_REQUIRED" });
+    const actor = actorOf(req);
+    if (parsed.data.organizationId !== ORGANIZATION_ID) return res.status(403).json({ error: "DEMO_ORGANIZATION_SCOPE_REQUIRED" });
     try {
       const result = await repository.postJournal(parsed.data, actor);
       return res.status(201).json({ item: result, provenance: repository.provenance() });
@@ -100,15 +110,14 @@ export function createApi(repository: OperationsRepository) {
     }
   });
 
-  router.post("/ledger/journals/:journalId/reverse", async (req, res) => {
+  router.post("/ledger/journals/:journalId/reverse", requireRole("treasury", "checker"), async (req, res) => {
     const body = z.object({ idempotencyKey: z.string().min(8).max(120) }).safeParse(req.body);
     if (!body.success) return res.status(400).json({ error: "INVALID_REVERSAL_REQUEST" });
-    const actor = demoActor(req);
-    if (actor.organizationId !== "org_demo") return res.status(403).json({ error: "DEMO_ORGANIZATION_SCOPE_REQUIRED" });
     try {
-      const result = await repository.reverseJournal(req.params.journalId, body.data.idempotencyKey, actor);
+      const result = await repository.reverseJournal(req.params.journalId, body.data.idempotencyKey, actorOf(req));
       return res.status(201).json({ item: result, provenance: repository.provenance() });
     } catch (error) {
+      if (error instanceof MakerCheckerViolation) return res.status(403).json({ error: "MAKER_CHECKER_VIOLATION", message: error.message });
       return res.status(422).json({ error: error instanceof Error ? error.message : "Reversal failed" });
     }
   });

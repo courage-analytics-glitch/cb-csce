@@ -1,4 +1,4 @@
-import { mysqlTable, varchar, text, decimal, datetime, json, mysqlEnum, int, index, uniqueIndex } from "drizzle-orm/mysql-core";
+import { mysqlTable, varchar, text, decimal, datetime, json, mysqlEnum, int, index, uniqueIndex, primaryKey } from "drizzle-orm/mysql-core";
 
 export const organizations = mysqlTable("organizations", {
   id: varchar("id", { length: 40 }).primaryKey(),
@@ -71,8 +71,31 @@ export const trades = mysqlTable("trades", {
   riskLevel: varchar("risk_level", { length: 20 }).notNull(),
   readiness: int("readiness").notNull().default(0),
   blockers: json("blockers"),
+  holdPlacedBy: varchar("hold_placed_by", { length: 40 }),
+  holdPlacedAt: datetime("hold_placed_at"),
+  holdReason: varchar("hold_reason", { length: 240 }),
+  holdPreviousStatus: varchar("hold_previous_status", { length: 40 }),
+  holdPreviousReadiness: int("hold_previous_readiness"),
   updatedAt: datetime("updated_at").notNull()
 }, (table) => ({ tradeReferenceUnique: uniqueIndex("trade_org_reference").on(table.organizationId, table.tradeReference) }));
+
+export const users = mysqlTable("users", {
+  id: varchar("id", { length: 40 }).primaryKey(),
+  clerkUserId: varchar("clerk_user_id", { length: 64 }).notNull(),
+  email: varchar("email", { length: 320 }).notNull(),
+  displayName: varchar("display_name", { length: 160 }),
+  createdAt: datetime("created_at").notNull()
+}, (table) => ({ clerkUserIdUnique: uniqueIndex("users_clerk_user_id").on(table.clerkUserId) }));
+
+export const organizationMemberships = mysqlTable("organization_memberships", {
+  userId: varchar("user_id", { length: 40 }).notNull().references(() => users.id),
+  organizationId: varchar("organization_id", { length: 40 }).notNull().references(() => organizations.id),
+  role: mysqlEnum("role", ["operations", "compliance", "treasury", "checker", "auditor", "admin"]).notNull(),
+  createdAt: datetime("created_at").notNull()
+}, (table) => ({
+  pk: primaryKey({ columns: [table.userId, table.organizationId] }),
+  organizationIndex: index("organization_memberships_org_idx").on(table.organizationId)
+}));
 
 export const auditEvents = mysqlTable("audit_events", {
   id: varchar("id", { length: 40 }).primaryKey(),

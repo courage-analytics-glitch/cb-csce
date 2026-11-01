@@ -3,8 +3,20 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { clerkMiddleware } from "@clerk/express";
 import { createApi } from "./api.js";
+import { clerkFrontendApiHost, clerkSessionResolver, contentSecurityPolicy } from "./auth.js";
 import { OperationsRepository } from "./repository.js";
+
+// Names the missing variable only; Clerk values are never echoed.
+function requiredEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name} is not configured; refusing to start without Clerk authentication.`);
+  return value;
+}
+
+requiredEnv("CLERK_SECRET_KEY");
+const csp = contentSecurityPolicy(clerkFrontendApiHost(requiredEnv("CLERK_PUBLISHABLE_KEY")));
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -23,11 +35,13 @@ app.use((req, res, next) => {
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
   res.setHeader("X-DNS-Prefetch-Control", "off");
-  res.setHeader("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self' data:");
+  res.setHeader("Content-Security-Policy", csp);
   if (req.path.startsWith("/api/")) res.setHeader("Cache-Control", "no-store");
   next();
 });
-app.use("/api", createApi(repository));
+// Reads CLERK_SECRET_KEY and CLERK_PUBLISHABLE_KEY from the environment.
+app.use(clerkMiddleware());
+app.use("/api", createApi(repository, { resolveSession: clerkSessionResolver }));
 app.use("/api", (_req, res) => res.status(404).json({ error: "API_ROUTE_NOT_FOUND" }));
 
 const compiledPublicDir = path.resolve(__dirname, "../public");
