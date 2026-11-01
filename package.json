@@ -10,7 +10,8 @@
     "start": "node dist/server/index.js",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test tests/**/*.test.ts",
-    "db:migrate": "tsx server/migrate.ts"
+    "db:migrate": "tsx server/migrate.ts",
+    "users:grant": "tsx --env-file-if-exists=.env server/grant-membership.ts"
   },
   "dependencies": {
     "@clerk/express": "2.1.86",

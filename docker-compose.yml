@@ -1,0 +1,19 @@
+# Local MySQL for development only. Credentials come from .env.mysql (gitignored);
+# copy .env.mysql.example to create it. The port is bound to loopback only.
+services:
+  mysql:
+    image: mysql:8.4.13
+    env_file: .env.mysql
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - cbcsce-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  cbcsce-mysql-data:

@@ -13,7 +13,10 @@ export const actionRoles = {
   releaseHold: ["compliance", "checker"],
   validateJournal: ["treasury", "checker"],
   postJournal: ["treasury"],
-  reverseJournal: ["treasury", "checker"]
+  reverseJournal: ["treasury", "checker"],
+  // UI-only: there is no trade-creation endpoint yet. When one is added, gate it to
+  // the same role server-side with requireRole("operations").
+  createTrade: ["operations"]
 } as const satisfies Record<string, readonly Role[]>;
 export type Action = keyof typeof actionRoles;
 

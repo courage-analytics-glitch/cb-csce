@@ -138,6 +138,13 @@ export class OperationsRepository {
     }
   }
 
+  /** Releases the database pool; used by one-shot CLI scripts so the process can exit. */
+  async close(): Promise<void> {
+    const pool = this.pool;
+    this.pool = undefined;
+    await pool?.end();
+  }
+
   provenance(): Provenance {
     return this.mode;
   }

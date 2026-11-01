@@ -17,6 +17,22 @@ export class UnauthenticatedError extends Error {
   }
 }
 
+/** A non-2xx API response. `message` stays the server's error code so existing displays are unchanged. */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  /** Human-readable explanation from the server's `message` field, when it sends one. */
+  readonly detail?: string;
+
+  constructor(status: number, code: string, detail?: string) {
+    super(code);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<ApiEnvelope<T>> {
   // Fail closed: never send a request without a bearer token.
   const token = tokenProvider ? await tokenProvider() : null;
@@ -26,6 +42,6 @@ export async function api<T>(path: string, init?: RequestInit): Promise<ApiEnvel
   headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(`/api${path}`, { ...init, headers });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error ?? `Request failed with status ${response.status}`);
+  if (!response.ok) throw new ApiError(response.status, typeof payload.error === "string" ? payload.error : `Request failed with status ${response.status}`, typeof payload.message === "string" ? payload.message : undefined);
   return payload as ApiEnvelope<T>;
 }

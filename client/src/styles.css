@@ -123,3 +123,6 @@ h1 { margin-top: 8px; color: #172033; font-size: 27px; font-weight: 650; letter-
 .signin-brand { display: flex; align-items: center; gap: 12px; }
 .signin-brand strong { display: block; font-size: 16px; }
 .signin-brand small { color: #6B7280; font-size: 12px; }
+.table-action-group { display: inline-flex; gap: 6px; }
+.table-action:disabled { opacity: .6; cursor: progress; }
+.notice[role="alert"] strong { margin-right: 4px; }
